@@ -1,6 +1,9 @@
+import json
 import math
+import os
 import turtle
 import tkinter as tk
+from datetime import datetime
 
 # Beige color palette
 BG = '#f5ecd9'
@@ -19,6 +22,24 @@ WHITE = '#ffffff'
 
 WIDTH, HEIGHT = 600, 640
 DEFAULT_MESSAGE = 'Tap a coffee to add it to your order'
+VISIBLE_ROWS = 4
+
+# Size and extras: (name, price change)
+SIZES = [('Small', -0.50), ('Medium', 0.0), ('Large', 0.75)]
+EXTRAS = [('Extra shot', 0.50), ('Oat milk', 0.60), ('Vanilla', 0.40)]
+SIZE_PRICES = dict(SIZES)
+EXTRA_PRICES = dict(EXTRAS)
+EXTRA_ORDER = [name for name, _ in EXTRAS]
+
+# Order history is saved next to this script
+HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'orders.json'
+)
+
+
+# Cut long text so it fits on one line
+def shorten(text, limit):
+    return text if len(text) <= limit else text[:limit - 3] + '...'
 
 
 class Coffee:
@@ -28,19 +49,51 @@ class Coffee:
         self.price = price
 
 
+class OrderItem:
+    # One coffee with its chosen size and extras
+    def __init__(self, coffee, size='Medium', extras=()):
+        self.coffee = coffee
+        self.size = size
+        self.extras = tuple(extras)
+
+    @property
+    def name(self):
+        return self.coffee.name
+
+    # Price including size and extras
+    @property
+    def price(self):
+        return (self.coffee.price
+                + SIZE_PRICES[self.size]
+                + sum(EXTRA_PRICES[e] for e in self.extras))
+
+    # Items with the same key are grouped together in the cart
+    @property
+    def key(self):
+        return (self.name, self.size, self.extras)
+
+    # Short description, e.g. "Latte (L) + Oat milk"
+    @property
+    def label(self):
+        text = f'{self.name} ({self.size[0]})'
+        if self.extras:
+            text += ' + ' + ', '.join(self.extras)
+        return text
+
+
 class Order:
     # Initialize order with empty list
     def __init__(self):
         self.items = []
 
-    # Add coffee to order
-    def add_item(self, coffee):
-        self.items.append(coffee)
+    # Add an item to the order
+    def add_item(self, item):
+        self.items.append(item)
 
-    # Remove one coffee with this name from the order
-    def remove_one(self, name):
+    # Remove one item matching this key
+    def remove_one(self, key):
         for i in range(len(self.items) - 1, -1, -1):
-            if self.items[i].name == name:
+            if self.items[i].key == key:
                 del self.items[i]
                 return
 
@@ -48,13 +101,13 @@ class Order:
     def total(self):
         return sum(item.price for item in self.items)
 
-    # Group identical items: {name: [count, unit_price]}
+    # Group identical items: {key: [count, unit_price, item]}
     def grouped(self):
         groups = {}
         for item in self.items:
-            if item.name not in groups:
-                groups[item.name] = [0, item.price]
-            groups[item.name][0] += 1
+            if item.key not in groups:
+                groups[item.key] = [0, item.price, item]
+            groups[item.key][0] += 1
         return groups
 
     # Remove everything from the order
@@ -67,11 +120,21 @@ class CoffeeApp:
     def __init__(self, menu):
         self.menu = menu
         self.order = Order()
-        self.state = 'menu'  # 'menu', 'confirm' or 'done'
+        # 'menu', 'options', 'confirm', 'done' or 'history'
+        self.state = 'menu'
         self.message = DEFAULT_MESSAGE
         self.buttons = []  # (x, y, w, h, callback)
+
+        self.history = self.load_history()
+        self.cart_scroll = 0
         self.last_total = 0.0
         self.last_count = 0
+        self.last_order_no = 0
+
+        # Current selection in the options card
+        self.sel_coffee = None
+        self.sel_size = 'Medium'
+        self.sel_extras = []
 
         self.screen = turtle.Screen()
         self.screen.setup(WIDTH, HEIGHT)
@@ -100,6 +163,26 @@ class CoffeeApp:
         pen.penup()
         pen.speed(0)
         return pen
+
+    # ---------- Saving and loading ----------
+
+    # Load past orders from the JSON file
+    def load_history(self):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    # Save all orders to the JSON file
+    def save_history(self):
+        try:
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, indent=2)
+            return True
+        except OSError:
+            return False
 
     # ---------- Drawing helpers ----------
 
@@ -235,7 +318,7 @@ class CoffeeApp:
 
     # Draw a clickable action button
     def action_button(self, x, y, w, h, label, callback,
-                      enabled=True, primary=False):
+                      enabled=True, primary=False, size=14, sublabel=None):
         if not enabled:
             fill, outline, color = DISABLED_FILL, DISABLED_LINE, DISABLED_TEXT
         elif primary:
@@ -244,7 +327,15 @@ class CoffeeApp:
             fill, outline, color = SOFT, BORDER, TEXT
 
         self.round_rect(x, y, w, h, 12, fill, outline, shadow=enabled)
-        self.text(x + w / 2, y + h / 2 - 8, label, 14, color, 'center', 'bold')
+        if sublabel:
+            # Two lines: name on top, smaller text (e.g. price) below
+            self.text(x + w / 2, y + h / 2 + 1, label, size,
+                      color, 'center', 'bold')
+            self.text(x + w / 2, y + h / 2 - 14, sublabel, size - 1,
+                      color, 'center', 'normal')
+        else:
+            self.text(x + w / 2, y + h / 2 - size * 0.58, label, size,
+                      color, 'center', 'bold')
         if enabled:
             self.buttons.append((x, y, w, h, callback))
 
@@ -274,7 +365,9 @@ class CoffeeApp:
         self.line([(x + w - 28, cy - 6), (x + w - 28, cy + 6)], WHITE, 3)
 
         if enabled:
-            self.buttons.append((x, y, w, h, lambda c=coffee: self.add(c)))
+            self.buttons.append(
+                (x, y, w, h, lambda c=coffee: self.open_options(c))
+            )
 
     # Draw the order summary panel
     def draw_order_panel(self):
@@ -286,25 +379,49 @@ class CoffeeApp:
                   11, MUTED, 'right', 'italic')
         self.line([(-215, -147), (215, -147)], BORDER, 1)
 
-        groups = self.order.grouped()
-        if not groups:
+        rows = list(self.order.grouped().items())
+        can_edit = self.state == 'menu'
+
+        # Keep the scroll position valid
+        max_scroll = max(0, len(rows) - VISIBLE_ROWS)
+        self.cart_scroll = min(max(self.cart_scroll, 0), max_scroll)
+
+        # Scroll arrows when the cart has more rows than fit
+        if max_scroll > 0 and can_edit:
+            for cx, direction in ((100, 1), (126, -1)):
+                cy = -131
+                self.disc(cx, cy, 9, SOFT, BORDER)
+                self.line(
+                    [(cx - 4, cy - 2 * direction),
+                     (cx, cy + 2 * direction),
+                     (cx + 4, cy - 2 * direction)],
+                    TEXT, 2
+                )
+                step = -1 if direction == 1 else 1
+                self.buttons.append(
+                    (cx - 10, cy - 10, 20, 20,
+                     lambda s=step: self.scroll_cart(s))
+                )
+
+        if not rows:
             self.text(0, -202, 'Your cup is empty - pick a coffee above',
                       12, MUTED, 'center', 'italic')
         else:
             y = -168
-            can_remove = self.state == 'menu'
-            for name, (qty, price) in groups.items():
-                self.text(-215, y, f'{qty} x {name}', 13, TEXT)
-                self.text(160, y, f'${qty * price:.2f}', 13, ACCENT, 'right', 'bold')
+            visible = rows[self.cart_scroll:self.cart_scroll + VISIBLE_ROWS]
+            for key, (qty, unit, item) in visible:
+                self.text(-215, y, shorten(f'{qty} x {item.label}', 40),
+                          12, TEXT)
+                self.text(160, y, f'${qty * unit:.2f}', 13, ACCENT, 'right', 'bold')
 
                 # Remove-one button
-                if can_remove:
+                if can_edit:
                     cx, cy = 205, y + 8
                     self.disc(cx, cy, 11, SOFT, BORDER)
                     self.line([(cx - 5, cy), (cx + 5, cy)], TEXT, 3)
                     self.buttons.append(
                         (cx - 12, cy - 12, 24, 24,
-                         lambda n=name: self.remove_one(n))
+                         lambda k=key: self.remove_one(k))
                     )
                 y -= 23
 
@@ -312,18 +429,58 @@ class CoffeeApp:
         self.text(-215, -276, 'Total', 14, MUTED)
         self.text(215, -278, f'${self.order.total():.2f}', 18, TEXT, 'right', 'bold')
 
-    # Draw the "order confirmed" message card on top of everything
-    def draw_confirmation(self):
-        self.buttons = []  # Only the card's button can be clicked now
+    # Draw a big centered card on top of the menu
+    def draw_card(self):
+        self.buttons = []  # Only the card's buttons can be clicked now
+        self.round_rect(-220, -110, 440, 290, 20, CARD, ACCENT, shadow=True)
 
-        self.round_rect(-200, -70, 400, 210, 20, CARD, ACCENT, shadow=True)
+    # Card where the customer picks size and extras
+    def draw_options(self):
+        self.draw_card()
+        item = OrderItem(self.sel_coffee, self.sel_size, self.sel_extras)
+
+        self.text(0, 150, f'{self.sel_coffee.name}  -  ${self.sel_coffee.price:.2f}',
+                  18, TEXT, 'center', 'bold')
+
+        # Size buttons
+        self.text(-202, 112, 'Size', 12, MUTED, 'left', 'bold')
+        for i, (name, delta) in enumerate(SIZES):
+            label = name
+            if delta:
+                sign = '+' if delta > 0 else '-'
+                label += f' {sign}${abs(delta):.2f}'
+            self.action_button(
+                -202 + i * 138, 68, 128, 34, label,
+                lambda n=name: self.set_size(n),
+                primary=(self.sel_size == name), size=12
+            )
+
+        # Extras buttons (can pick any number)
+        self.text(-202, 40, 'Extras', 12, MUTED, 'left', 'bold')
+        for i, (name, price) in enumerate(EXTRAS):
+            self.action_button(
+                -202 + i * 138, -8, 128, 40, name,
+                lambda n=name: self.toggle_extra(n),
+                primary=(name in self.sel_extras), size=12,
+                sublabel=f'+${price:.2f}'
+            )
+
+        self.text(0, -34, f'Price: ${item.price:.2f}', 15, ACCENT, 'center', 'bold')
+
+        self.action_button(-202, -90, 196, 36, 'Add to Order',
+                           self.add_to_order, primary=True)
+        self.action_button(6, -90, 196, 36, 'Cancel', self.cancel_options)
+
+    # Card shown after the order is confirmed
+    def draw_confirmation(self):
+        self.draw_card()
 
         # Check mark
         self.disc(0, 100, 26, ACCENT)
         self.line([(-11, 100), (-3, 91), (12, 110)], WHITE, 4)
 
         self.text(0, 50, 'Order Confirmed!', 20, TEXT, 'center', 'bold')
-        self.text(0, 25, 'Thank you! Your coffee is on its way.',
+        self.text(0, 25, f'Order #{self.last_order_no} - your coffee is on its way.',
                   12, MUTED, 'center', 'italic')
         self.text(
             0, 0,
@@ -333,6 +490,49 @@ class CoffeeApp:
         )
         self.action_button(-90, -55, 180, 36, 'New Order',
                            self.new_order, primary=True)
+
+    # Card listing recent orders and sales
+    def draw_history(self):
+        self.draw_card()
+        self.text(0, 150, 'Order History', 18, TEXT, 'center', 'bold')
+
+        if not self.history:
+            self.text(0, 70, 'No orders yet', 13, MUTED, 'center', 'italic')
+        else:
+            y = 118
+            for record in reversed(self.history[-5:]):
+                count = record.get('count', 0)
+                self.text(
+                    -195, y,
+                    f'#{record.get("id", "?")}   {record.get("time", "")[5:]}'
+                    f'   {count} item{"s" if count != 1 else ""}',
+                    12, TEXT
+                )
+                self.text(195, y, f'${record.get("total", 0):.2f}',
+                          12, ACCENT, 'right', 'bold')
+                y -= 24
+
+        self.line([(-195, 8), (195, 8)], BORDER, 1)
+
+        # Sales today and best seller
+        today = datetime.now().strftime('%Y-%m-%d')
+        todays = [r for r in self.history if r.get('time', '').startswith(today)]
+        sales = sum(r.get('total', 0) for r in todays)
+        self.text(-195, -18, f'Sales today: ${sales:.2f}  ({len(todays)} orders)',
+                  13, TEXT, 'left', 'bold')
+
+        counts = {}
+        for record in self.history:
+            for entry in record.get('items', []):
+                name = entry.get('name', '?')
+                counts[name] = counts.get(name, 0) + entry.get('qty', 0)
+        if counts:
+            best = max(counts, key=counts.get)
+            self.text(-195, -42, f'Best seller: {best} ({counts[best]} sold)',
+                      12, MUTED, 'left', 'italic')
+
+        self.action_button(-90, -95, 180, 36, 'Close', self.close_history,
+                           primary=True)
 
     # Redraw all changing parts of the window
     def render(self):
@@ -350,17 +550,25 @@ class CoffeeApp:
                                self.confirm, primary=True)
             self.action_button(8, -104, 232, 36, 'Cancel', self.cancel)
         else:
-            self.action_button(-240, -104, 150, 36, 'Checkout',
-                               self.start_checkout, has_items, primary=True)
-            self.action_button(-75, -104, 150, 36, 'Clear Order',
-                               self.clear_order, has_items)
-            self.action_button(90, -104, 150, 36, 'Exit', self.exit_app)
+            self.action_button(-240, -104, 111, 36, 'Checkout',
+                               self.start_checkout, has_items,
+                               primary=True, size=13)
+            self.action_button(-117, -104, 111, 36, 'Clear Order',
+                               self.clear_order, has_items, size=13)
+            self.action_button(6, -104, 111, 36, 'History',
+                               self.open_history, size=13)
+            self.action_button(129, -104, 111, 36, 'Exit',
+                               self.exit_app, size=13)
 
         self.draw_order_panel()
         self.text(0, -309, self.message, 11, MUTED, 'center', 'italic')
 
-        if self.state == 'done':
+        if self.state == 'options':
+            self.draw_options()
+        elif self.state == 'done':
             self.draw_confirmation()
+        elif self.state == 'history':
+            self.draw_history()
 
         self.screen.update()
 
@@ -373,16 +581,52 @@ class CoffeeApp:
                 callback()
                 return
 
-    # Add coffee to order
-    def add(self, coffee):
-        self.order.add_item(coffee)
-        self.message = f'Added {coffee.name} to your order'
+    # Open the size and extras card for a coffee
+    def open_options(self, coffee):
+        self.sel_coffee = coffee
+        self.sel_size = 'Medium'
+        self.sel_extras = []
+        self.state = 'options'
+        self.message = f'Customize your {coffee.name}'
+        self.render()
+
+    # Choose a size
+    def set_size(self, name):
+        self.sel_size = name
+        self.render()
+
+    # Turn an extra on or off
+    def toggle_extra(self, name):
+        if name in self.sel_extras:
+            self.sel_extras.remove(name)
+        else:
+            self.sel_extras.append(name)
+            self.sel_extras.sort(key=EXTRA_ORDER.index)
+        self.render()
+
+    # Add the customized coffee to the order
+    def add_to_order(self):
+        item = OrderItem(self.sel_coffee, self.sel_size, self.sel_extras)
+        self.order.add_item(item)
+        self.state = 'menu'
+        self.message = f'Added {item.label} to your order'
+        self.render()
+
+    # Close the options card without adding anything
+    def cancel_options(self):
+        self.state = 'menu'
+        self.message = DEFAULT_MESSAGE
         self.render()
 
     # Remove one of an item from the order
-    def remove_one(self, name):
-        self.order.remove_one(name)
-        self.message = f'Removed one {name}'
+    def remove_one(self, key):
+        self.order.remove_one(key)
+        self.message = 'Removed one item'
+        self.render()
+
+    # Scroll the order list up or down
+    def scroll_cart(self, step):
+        self.cart_scroll += step
         self.render()
 
     # Ask the customer to confirm
@@ -391,13 +635,37 @@ class CoffeeApp:
         self.message = f'Proceed to checkout? Total: ${self.order.total():.2f}'
         self.render()
 
-    # Finish the order and show the thank-you message
+    # Finish the order, save it and show the thank-you message
     def confirm(self):
+        groups = self.order.grouped()
+        order_no = max((r.get('id', 0) for r in self.history), default=0) + 1
+
+        self.history.append({
+            'id': order_no,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'count': len(self.order.items),
+            'total': round(self.order.total(), 2),
+            'items': [
+                {
+                    'name': item.name,
+                    'size': item.size,
+                    'extras': list(item.extras),
+                    'qty': qty,
+                    'unit_price': round(unit, 2),
+                }
+                for qty, unit, item in groups.values()
+            ],
+        })
+        saved = self.save_history()
+
+        self.last_order_no = order_no
         self.last_total = self.order.total()
         self.last_count = len(self.order.items)
         self.order.clear()
+        self.cart_scroll = 0
         self.state = 'done'
-        self.message = 'Order confirmed! Thank you!'
+        self.message = ('Order confirmed! Thank you!' if saved
+                        else 'Order confirmed (history could not be saved)')
         self.render()
 
     # Go back to the menu
@@ -415,7 +683,20 @@ class CoffeeApp:
     # Remove everything from the order
     def clear_order(self):
         self.order.clear()
+        self.cart_scroll = 0
         self.message = 'Order cleared'
+        self.render()
+
+    # Show past orders
+    def open_history(self):
+        self.state = 'history'
+        self.message = 'Order history'
+        self.render()
+
+    # Close the history card
+    def close_history(self):
+        self.state = 'menu'
+        self.message = DEFAULT_MESSAGE
         self.render()
 
     # Close the window
