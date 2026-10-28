@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import textwrap
 import turtle
 import tkinter as tk
 from datetime import datetime
@@ -18,23 +19,36 @@ MUTED = '#8c7a60'
 DISABLED_FILL = '#efe6d2'
 DISABLED_LINE = '#e0d5bc'
 DISABLED_TEXT = '#b3a58a'
+STAR = '#d4a017'
+STAR_EMPTY = '#e6dac0'
 WHITE = '#ffffff'
 
 WIDTH, HEIGHT = 600, 640
-DEFAULT_MESSAGE = 'Tap a coffee to add it to your order'
+DEFAULT_MESSAGE = 'Tap a drink to add it to your order'
 VISIBLE_ROWS = 4
 
-# Size and extras: (name, price change)
-SIZES = [('Small', -0.50), ('Medium', 0.0), ('Large', 0.75)]
-EXTRAS = [('Extra shot', 0.50), ('Oat milk', 0.60), ('Vanilla', 0.40)]
-SIZE_PRICES = dict(SIZES)
-EXTRA_PRICES = dict(EXTRAS)
-EXTRA_ORDER = [name for name, _ in EXTRAS]
+# Menu sections
+CATEGORIES = ['Coffee', 'Tea', 'Other Drinks']
+TEMPS = ['Hot', 'Cold']
 
-# Order history is saved next to this script
-HISTORY_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'orders.json'
-)
+# Size and extras: (name, price change in Tk)
+SIZES = [('Small', -20), ('Medium', 0), ('Large', 40)]
+EXTRAS_BY_CATEGORY = {
+    'Coffee': [('Extra shot', 40), ('Oat milk', 50), ('Vanilla', 30)],
+    'Tea': [('Honey', 20), ('Lemon', 15), ('Ginger', 15)],
+    'Other Drinks': [('Whipped cream', 30), ('Caramel', 25), ('Honey', 20)],
+}
+SIZE_PRICES = dict(SIZES)
+
+# Saved data lives next to this script
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HISTORY_FILE = os.path.join(BASE_DIR, 'orders.json')
+REVIEWS_FILE = os.path.join(BASE_DIR, 'reviews.json')
+
+
+# Format a price in Bangladeshi Taka
+def money(amount):
+    return f'Tk {amount:,.0f}'
 
 
 # Cut long text so it fits on one line
@@ -43,14 +57,16 @@ def shorten(text, limit):
 
 
 class Coffee:
-    # Initialize coffee with name and price
-    def __init__(self, name, price):
+    # A drink on the menu (the name "Coffee" is kept for every drink type)
+    def __init__(self, name, price, category='Coffee', temp='Hot'):
         self.name = name
         self.price = price
+        self.category = category
+        self.temp = temp
 
 
 class OrderItem:
-    # One coffee with its chosen size and extras
+    # One drink with its chosen size and extras
     def __init__(self, coffee, size='Medium', extras=()):
         self.coffee = coffee
         self.size = size
@@ -63,9 +79,10 @@ class OrderItem:
     # Price including size and extras
     @property
     def price(self):
+        extra_prices = dict(EXTRAS_BY_CATEGORY[self.coffee.category])
         return (self.coffee.price
                 + SIZE_PRICES[self.size]
-                + sum(EXTRA_PRICES[e] for e in self.extras))
+                + sum(extra_prices[e] for e in self.extras))
 
     # Items with the same key are grouped together in the cart
     @property
@@ -120,14 +137,20 @@ class CoffeeApp:
     def __init__(self, menu):
         self.menu = menu
         self.order = Order()
-        # 'menu', 'options', 'confirm', 'done' or 'history'
+        # 'menu', 'options', 'confirm', 'done', 'history',
+        # 'reviews' or 'write_review'
         self.state = 'menu'
         self.message = DEFAULT_MESSAGE
         self.buttons = []  # (x, y, w, h, callback)
 
-        self.history = self.load_history()
+        # Menu filters
+        self.category = CATEGORIES[0]
+        self.temp = TEMPS[0]
+
+        self.history = self.load_json(HISTORY_FILE)
+        self.reviews = self.load_json(REVIEWS_FILE)
         self.cart_scroll = 0
-        self.last_total = 0.0
+        self.last_total = 0
         self.last_count = 0
         self.last_order_no = 0
 
@@ -135,6 +158,11 @@ class CoffeeApp:
         self.sel_coffee = None
         self.sel_size = 'Medium'
         self.sel_extras = []
+
+        # Review being written
+        self.rv_rating = 0
+        self.rv_name = ''
+        self.rv_comment = ''
 
         self.screen = turtle.Screen()
         self.screen.setup(WIDTH, HEIGHT)
@@ -166,20 +194,20 @@ class CoffeeApp:
 
     # ---------- Saving and loading ----------
 
-    # Load past orders from the JSON file
-    def load_history(self):
+    # Load a list from a JSON file
+    def load_json(self, path):
         try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             return data if isinstance(data, list) else []
         except (OSError, ValueError):
             return []
 
-    # Save all orders to the JSON file
-    def save_history(self):
+    # Save a list to a JSON file
+    def save_json(self, path, data):
         try:
-            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.history, f, indent=2)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
             return True
         except OSError:
             return False
@@ -235,6 +263,16 @@ class CoffeeApp:
         pen.end_fill()
         pen.penup()
 
+    # Draw a five-point star
+    def star(self, cx, cy, r, filled):
+        points = []
+        for i in range(10):
+            radius = r if i % 2 == 0 else r * 0.45
+            angle = math.radians(90 + i * 36)
+            points.append((cx + radius * math.cos(angle),
+                           cy + radius * math.sin(angle)))
+        self.polygon(points, STAR if filled else STAR_EMPTY)
+
     # Draw a line through one or more points
     def line(self, points, color, width=2):
         pen = self.pen
@@ -258,17 +296,15 @@ class CoffeeApp:
 
     # ---------- Static design ----------
 
-    # Draw shop name and tagline
+    # Draw shop name and tagline (cup on the left)
     def draw_title(self):
-        self.text(0, 262, 'BREW CAFE', 28, TEXT, 'center', 'bold')
-        self.text(0, 236, 'Freshly brewed, always', 12, MUTED, 'center', 'italic')
-        for side in (-1, 1):
-            self.line([(side * 100, 242), (side * 165, 242)], BORDER, 2)
+        self.text(-112, 272, 'BREW CAFE', 26, TEXT, 'left', 'bold')
+        self.text(-112, 248, 'Freshly brewed, always', 11, MUTED, 'left', 'italic')
 
     # Draw a simple coffee cup with saucer, handle and steam
     def draw_cup(self):
-        s = 0.46         # Scale
-        ox, oy = 0, 135  # Position
+        s = 0.36            # Scale
+        ox, oy = -185, 241  # Position
 
         def p(x, y):
             return (ox + s * x, oy + s * y)
@@ -290,7 +326,7 @@ class CoffeeApp:
         pen.goto(p(92, 72))
         pen.setheading(0)
         pen.color(ACCENT_LIGHT)
-        pen.pensize(6)
+        pen.pensize(5)
         pen.pendown()
         pen.circle(26 * s)
         pen.penup()
@@ -306,7 +342,7 @@ class CoffeeApp:
         for x in (-35, 0, 35):
             pen.penup()
             pen.color(BORDER)
-            pen.pensize(3)
+            pen.pensize(2)
             pen.goto(p(x, 168))
             pen.pendown()
             for step in range(1, 27):
@@ -339,11 +375,29 @@ class CoffeeApp:
         if enabled:
             self.buttons.append((x, y, w, h, callback))
 
+    # Draw the Coffee / Tea / Other and Hot / Cold tabs
+    def draw_tabs(self):
+        enabled = self.state == 'menu'
+
+        for i, name in enumerate(CATEGORIES):
+            self.action_button(
+                -240 + i * 165, 208, 150, 32, name,
+                lambda n=name: self.set_category(n),
+                enabled, primary=(self.category == name), size=13
+            )
+
+        for i, name in enumerate(TEMPS):
+            self.action_button(
+                -240 + i * 248, 168, 232, 30, name,
+                lambda n=name: self.set_temp(n),
+                enabled, primary=(self.temp == name), size=13
+            )
+
     # Draw a clickable menu item
     def menu_button(self, index, coffee):
-        w, h = 480, 42
+        w, h = 480, 46
         x = -240
-        y = 90 - index * 50
+        y = 112 - index * 56
         cy = y + h / 2
         enabled = self.state == 'menu'
 
@@ -355,8 +409,8 @@ class CoffeeApp:
             name_color = price_color = plus_color = DISABLED_TEXT
 
         self.round_rect(x, y, w, h, 12, fill, outline, shadow=enabled)
-        self.text(x + 24, y + 12, coffee.name, 15, name_color)
-        self.text(x + w - 62, y + 12, f'${coffee.price:.2f}', 15,
+        self.text(x + 24, y + 15, coffee.name, 15, name_color)
+        self.text(x + w - 62, y + 15, money(coffee.price), 15,
                   price_color, 'right', 'bold')
 
         # Plus icon
@@ -404,15 +458,15 @@ class CoffeeApp:
                 )
 
         if not rows:
-            self.text(0, -202, 'Your cup is empty - pick a coffee above',
+            self.text(0, -202, 'Your cup is empty - pick a drink above',
                       12, MUTED, 'center', 'italic')
         else:
             y = -168
             visible = rows[self.cart_scroll:self.cart_scroll + VISIBLE_ROWS]
             for key, (qty, unit, item) in visible:
-                self.text(-215, y, shorten(f'{qty} x {item.label}', 40),
+                self.text(-215, y, shorten(f'{qty} x {item.label}', 38),
                           12, TEXT)
-                self.text(160, y, f'${qty * unit:.2f}', 13, ACCENT, 'right', 'bold')
+                self.text(160, y, money(qty * unit), 13, ACCENT, 'right', 'bold')
 
                 # Remove-one button
                 if can_edit:
@@ -427,7 +481,7 @@ class CoffeeApp:
 
         self.line([(-215, -252), (215, -252)], BORDER, 1)
         self.text(-215, -276, 'Total', 14, MUTED)
-        self.text(215, -278, f'${self.order.total():.2f}', 18, TEXT, 'right', 'bold')
+        self.text(215, -278, money(self.order.total()), 18, TEXT, 'right', 'bold')
 
     # Draw a big centered card on top of the menu
     def draw_card(self):
@@ -439,7 +493,7 @@ class CoffeeApp:
         self.draw_card()
         item = OrderItem(self.sel_coffee, self.sel_size, self.sel_extras)
 
-        self.text(0, 150, f'{self.sel_coffee.name}  -  ${self.sel_coffee.price:.2f}',
+        self.text(0, 150, f'{self.sel_coffee.name}  -  {money(self.sel_coffee.price)}',
                   18, TEXT, 'center', 'bold')
 
         # Size buttons
@@ -448,7 +502,7 @@ class CoffeeApp:
             label = name
             if delta:
                 sign = '+' if delta > 0 else '-'
-                label += f' {sign}${abs(delta):.2f}'
+                label += f' {sign}Tk {abs(delta)}'
             self.action_button(
                 -202 + i * 138, 68, 128, 34, label,
                 lambda n=name: self.set_size(n),
@@ -457,15 +511,16 @@ class CoffeeApp:
 
         # Extras buttons (can pick any number)
         self.text(-202, 40, 'Extras', 12, MUTED, 'left', 'bold')
-        for i, (name, price) in enumerate(EXTRAS):
+        extras = EXTRAS_BY_CATEGORY[self.sel_coffee.category]
+        for i, (name, price) in enumerate(extras):
             self.action_button(
                 -202 + i * 138, -8, 128, 40, name,
                 lambda n=name: self.toggle_extra(n),
                 primary=(name in self.sel_extras), size=12,
-                sublabel=f'+${price:.2f}'
+                sublabel=f'+Tk {price}'
             )
 
-        self.text(0, -34, f'Price: ${item.price:.2f}', 15, ACCENT, 'center', 'bold')
+        self.text(0, -34, f'Price: {money(item.price)}', 15, ACCENT, 'center', 'bold')
 
         self.action_button(-202, -90, 196, 36, 'Add to Order',
                            self.add_to_order, primary=True)
@@ -480,16 +535,18 @@ class CoffeeApp:
         self.line([(-11, 100), (-3, 91), (12, 110)], WHITE, 4)
 
         self.text(0, 50, 'Order Confirmed!', 20, TEXT, 'center', 'bold')
-        self.text(0, 25, f'Order #{self.last_order_no} - your coffee is on its way.',
+        self.text(0, 25, f'Order #{self.last_order_no} - your order is on its way.',
                   12, MUTED, 'center', 'italic')
         self.text(
             0, 0,
             f'{self.last_count} item{"s" if self.last_count != 1 else ""}'
-            f'  -  Total: ${self.last_total:.2f}',
+            f'  -  Total: {money(self.last_total)}',
             13, TEXT, 'center', 'bold'
         )
-        self.action_button(-90, -55, 180, 36, 'New Order',
+        self.action_button(-202, -70, 196, 36, 'New Order',
                            self.new_order, primary=True)
+        self.action_button(6, -70, 196, 36, 'Leave a Review',
+                           self.open_write_review)
 
     # Card listing recent orders and sales
     def draw_history(self):
@@ -508,7 +565,7 @@ class CoffeeApp:
                     f'   {count} item{"s" if count != 1 else ""}',
                     12, TEXT
                 )
-                self.text(195, y, f'${record.get("total", 0):.2f}',
+                self.text(195, y, money(record.get('total', 0)),
                           12, ACCENT, 'right', 'bold')
                 y -= 24
 
@@ -518,7 +575,7 @@ class CoffeeApp:
         today = datetime.now().strftime('%Y-%m-%d')
         todays = [r for r in self.history if r.get('time', '').startswith(today)]
         sales = sum(r.get('total', 0) for r in todays)
-        self.text(-195, -18, f'Sales today: ${sales:.2f}  ({len(todays)} orders)',
+        self.text(-195, -18, f'Sales today: {money(sales)}  ({len(todays)} orders)',
                   13, TEXT, 'left', 'bold')
 
         counts = {}
@@ -531,8 +588,78 @@ class CoffeeApp:
             self.text(-195, -42, f'Best seller: {best} ({counts[best]} sold)',
                       12, MUTED, 'left', 'italic')
 
-        self.action_button(-90, -95, 180, 36, 'Close', self.close_history,
+        self.action_button(-90, -95, 180, 36, 'Close', self.close_card,
                            primary=True)
+
+    # Card showing customer reviews
+    def draw_reviews(self):
+        self.draw_card()
+        self.text(0, 150, 'Customer Reviews', 18, TEXT, 'center', 'bold')
+
+        if not self.reviews:
+            self.text(0, 60, 'No reviews yet - be the first to share!',
+                      12, MUTED, 'center', 'italic')
+        else:
+            # Average rating
+            average = sum(r.get('rating', 0) for r in self.reviews) / len(self.reviews)
+            for i in range(5):
+                self.star((i - 2) * 26, 128, 9, i < round(average))
+            total = len(self.reviews)
+            self.text(0, 98,
+                      f'{average:.1f} out of 5  -  {total} review{"s" if total != 1 else ""}',
+                      12, MUTED, 'center')
+
+            # Latest three reviews
+            y = 74
+            for review in reversed(self.reviews[-3:]):
+                name = shorten(review.get('name') or 'Guest', 22)
+                self.text(-195, y, name, 12, TEXT, 'left', 'bold')
+                for i in range(5):
+                    self.star(130 + i * 14, y + 6, 6, i < review.get('rating', 0))
+                comment = review.get('comment', '')
+                if comment:
+                    self.text(-195, y - 17, shorten(comment, 58),
+                              11, MUTED, 'left', 'italic')
+                y -= 46
+
+        self.action_button(-202, -92, 196, 36, 'Write a Review',
+                           self.open_write_review, primary=True)
+        self.action_button(6, -92, 196, 36, 'Close', self.close_card)
+
+    # Card where the customer writes a review
+    def draw_write_review(self):
+        self.draw_card()
+        self.text(0, 150, 'Write a Review', 18, TEXT, 'center', 'bold')
+
+        # Star rating (click a star)
+        self.text(-202, 120, 'Your rating', 12, MUTED, 'left', 'bold')
+        for i in range(5):
+            cx = (i - 2) * 52
+            self.star(cx, 90, 17, i < self.rv_rating)
+            self.buttons.append(
+                (cx - 24, 66, 48, 48, lambda n=i + 1: self.set_rating(n))
+            )
+
+        # Name and comment (typed in a small pop-up box)
+        self.action_button(-202, 34, 404, 30,
+                           f'Name: {self.rv_name or "Guest"}  (tap to change)',
+                           self.ask_name, size=12)
+        self.action_button(-202, -4, 404, 30,
+                           'Edit comment' if self.rv_comment else 'Write a comment',
+                           self.ask_comment, size=12)
+
+        # Comment preview
+        if self.rv_comment:
+            lines = textwrap.wrap(self.rv_comment, 56)
+            shown = lines[:2]
+            if len(lines) > 2:
+                shown[1] = shorten(shown[1] + '...', 56)
+            for i, line in enumerate(shown):
+                self.text(-202, -23 - i * 14, line, 11, MUTED, 'left', 'italic')
+
+        self.action_button(-202, -90, 196, 36, 'Submit', self.submit_review,
+                           enabled=self.rv_rating > 0, primary=True)
+        self.action_button(6, -90, 196, 36, 'Cancel', self.cancel_review)
 
     # Redraw all changing parts of the window
     def render(self):
@@ -540,7 +667,15 @@ class CoffeeApp:
         self.pen.clear()
         self.buttons = []
 
-        for i, coffee in enumerate(self.menu):
+        # Reviews button in the top-right corner
+        self.action_button(140, 258, 100, 34, 'Reviews', self.open_reviews,
+                           self.state == 'menu', size=13)
+
+        self.draw_tabs()
+
+        visible = [c for c in self.menu
+                   if c.category == self.category and c.temp == self.temp]
+        for i, coffee in enumerate(visible[:4]):
             self.menu_button(i, coffee)
 
         has_items = bool(self.order.items)
@@ -569,6 +704,10 @@ class CoffeeApp:
             self.draw_confirmation()
         elif self.state == 'history':
             self.draw_history()
+        elif self.state == 'reviews':
+            self.draw_reviews()
+        elif self.state == 'write_review':
+            self.draw_write_review()
 
         self.screen.update()
 
@@ -581,7 +720,17 @@ class CoffeeApp:
                 callback()
                 return
 
-    # Open the size and extras card for a coffee
+    # Switch between Coffee, Tea and Other Drinks
+    def set_category(self, name):
+        self.category = name
+        self.render()
+
+    # Switch between Hot and Cold
+    def set_temp(self, name):
+        self.temp = name
+        self.render()
+
+    # Open the size and extras card for a drink
     def open_options(self, coffee):
         self.sel_coffee = coffee
         self.sel_size = 'Medium'
@@ -601,10 +750,11 @@ class CoffeeApp:
             self.sel_extras.remove(name)
         else:
             self.sel_extras.append(name)
-            self.sel_extras.sort(key=EXTRA_ORDER.index)
+            order = [n for n, _ in EXTRAS_BY_CATEGORY[self.sel_coffee.category]]
+            self.sel_extras.sort(key=order.index)
         self.render()
 
-    # Add the customized coffee to the order
+    # Add the customized drink to the order
     def add_to_order(self):
         item = OrderItem(self.sel_coffee, self.sel_size, self.sel_extras)
         self.order.add_item(item)
@@ -632,7 +782,7 @@ class CoffeeApp:
     # Ask the customer to confirm
     def start_checkout(self):
         self.state = 'confirm'
-        self.message = f'Proceed to checkout? Total: ${self.order.total():.2f}'
+        self.message = f'Proceed to checkout? Total: {money(self.order.total())}'
         self.render()
 
     # Finish the order, save it and show the thank-you message
@@ -644,19 +794,19 @@ class CoffeeApp:
             'id': order_no,
             'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
             'count': len(self.order.items),
-            'total': round(self.order.total(), 2),
+            'total': self.order.total(),
             'items': [
                 {
                     'name': item.name,
                     'size': item.size,
                     'extras': list(item.extras),
                     'qty': qty,
-                    'unit_price': round(unit, 2),
+                    'unit_price': unit,
                 }
                 for qty, unit, item in groups.values()
             ],
         })
-        saved = self.save_history()
+        saved = self.save_json(HISTORY_FILE, self.history)
 
         self.last_order_no = order_no
         self.last_total = self.order.total()
@@ -693,8 +843,68 @@ class CoffeeApp:
         self.message = 'Order history'
         self.render()
 
-    # Close the history card
-    def close_history(self):
+    # Close the history or reviews card
+    def close_card(self):
+        self.state = 'menu'
+        self.message = DEFAULT_MESSAGE
+        self.render()
+
+    # ---------- Reviews ----------
+
+    # Show customer reviews
+    def open_reviews(self):
+        self.state = 'reviews'
+        self.message = 'What our customers say'
+        self.render()
+
+    # Start a new review
+    def open_write_review(self):
+        self.rv_rating = 0
+        self.rv_name = ''
+        self.rv_comment = ''
+        self.state = 'write_review'
+        self.message = 'Tap a star to rate us'
+        self.render()
+
+    # Set the star rating
+    def set_rating(self, value):
+        self.rv_rating = value
+        self.render()
+
+    # Ask for the customer's name in a pop-up box
+    def ask_name(self):
+        value = self.screen.textinput('Your name', 'Enter your name (optional):')
+        if value is not None:
+            self.rv_name = value.strip()[:24]
+        self.render()
+
+    # Ask for the comment in a pop-up box
+    def ask_comment(self):
+        value = self.screen.textinput('Your comment', 'Write your comment:')
+        if value is not None:
+            self.rv_comment = value.strip()[:200]
+        self.render()
+
+    # Save the review
+    def submit_review(self):
+        if self.rv_rating < 1:
+            return
+
+        self.reviews.append({
+            'name': self.rv_name or 'Guest',
+            'rating': self.rv_rating,
+            'comment': self.rv_comment,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        })
+        saved = self.save_json(REVIEWS_FILE, self.reviews)
+
+        self.state = 'reviews'
+        self.message = ('Thank you for your review!' if saved
+                        else 'Thanks! (review could not be saved)')
+        self.render()
+
+    # Leave without saving
+    def cancel_review(self):
         self.state = 'menu'
         self.message = DEFAULT_MESSAGE
         self.render()
@@ -714,13 +924,39 @@ class CoffeeApp:
             pass
 
 
-# Create the menu and start the app
+# Create the menu and start the app (prices are in Bangladeshi Taka)
 def main():
     menu = [
-        Coffee('Espresso', 2.5),
-        Coffee('Latte', 3.5),
-        Coffee('Cappuccino', 3.0),
-        Coffee('Americano', 2.0)
+        # Coffee - hot
+        Coffee('Espresso', 120, 'Coffee', 'Hot'),
+        Coffee('Latte', 180, 'Coffee', 'Hot'),
+        Coffee('Cappuccino', 170, 'Coffee', 'Hot'),
+        Coffee('Americano', 130, 'Coffee', 'Hot'),
+        # Coffee - cold
+        Coffee('Iced Latte', 200, 'Coffee', 'Cold'),
+        Coffee('Iced Americano', 150, 'Coffee', 'Cold'),
+        Coffee('Cold Brew', 220, 'Coffee', 'Cold'),
+        Coffee('Coffee Frappe', 250, 'Coffee', 'Cold'),
+        # Tea - hot
+        Coffee('Milk Tea', 60, 'Tea', 'Hot'),
+        Coffee('Black Tea', 40, 'Tea', 'Hot'),
+        Coffee('Green Tea', 70, 'Tea', 'Hot'),
+        Coffee('Masala Tea', 80, 'Tea', 'Hot'),
+        # Tea - cold
+        Coffee('Iced Lemon Tea', 90, 'Tea', 'Cold'),
+        Coffee('Iced Peach Tea', 110, 'Tea', 'Cold'),
+        Coffee('Mint Lemon Tea', 100, 'Tea', 'Cold'),
+        Coffee('Iced Milk Tea', 100, 'Tea', 'Cold'),
+        # Other drinks - hot
+        Coffee('Hot Chocolate', 160, 'Other Drinks', 'Hot'),
+        Coffee('Honey Ginger Lemon', 90, 'Other Drinks', 'Hot'),
+        Coffee('Turmeric Milk', 100, 'Other Drinks', 'Hot'),
+        Coffee('Hot Milk', 80, 'Other Drinks', 'Hot'),
+        # Other drinks - cold
+        Coffee('Mango Lassi', 150, 'Other Drinks', 'Cold'),
+        Coffee('Fresh Lime Soda', 90, 'Other Drinks', 'Cold'),
+        Coffee('Orange Juice', 140, 'Other Drinks', 'Cold'),
+        Coffee('Chocolate Shake', 200, 'Other Drinks', 'Cold'),
     ]
 
     app = CoffeeApp(menu)
